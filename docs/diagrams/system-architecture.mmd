@@ -1,0 +1,72 @@
+graph TB
+    subgraph Client_Tier ["Client Tier (Vercel Edge CDN)"]
+        SPA["Watermelon UI Web App<br/>(React 18 / Vite / TypeScript)"]
+    end
+
+    subgraph API_Tier ["API Tier (Render Web Service)"]
+        FastAPI["FastAPI ASGI Application<br/>(Python 3.11 / Uvicorn)"]
+        AuthRouter["Auth & OAuth Router"]
+        ProfileRouter["Profile & Context Router"]
+        ContactRouter["Contact Ingestion & Verification"]
+        CampaignRouter["Campaign & Review Queue Router"]
+        TelemetryRouter["Telemetry & Pixel Tracker"]
+        
+        FastAPI --> AuthRouter
+        FastAPI --> ProfileRouter
+        FastAPI --> ContactRouter
+        FastAPI --> CampaignRouter
+        FastAPI --> TelemetryRouter
+    end
+
+    subgraph Data_Tier ["Data Tier (Render Managed PostgreSQL 16)"]
+        Postgres[(PostgreSQL Database)]
+        T_Users["users & integration_tokens"]
+        T_Profiles["sender_profiles"]
+        T_Contacts["contacts & suppression"]
+        T_Campaigns["campaigns"]
+        T_Messages["messages (Task Queue)"]
+        T_Events["message_events (Audit)"]
+
+        Postgres --- T_Users
+        Postgres --- T_Profiles
+        Postgres --- T_Contacts
+        Postgres --- T_Campaigns
+        Postgres --- T_Messages
+        Postgres --- T_Events
+    end
+
+    subgraph Worker_Tier ["Execution Tier (Render Background Worker)"]
+        Worker["Dispatch Daemon<br/>(python -m app.worker.daemon)"]
+        Poller["Lease Poller<br/>(SKIP LOCKED)"]
+        Scheduler["Jitter & Cap Evaluator"]
+        Sender["Gmail Dispatcher"]
+        ReplyDetector["Thread Reply Detector"]
+        SheetsSync["Sheets Batch Sync"]
+
+        Worker --> Poller
+        Poller --> Scheduler
+        Scheduler --> Sender
+        Worker --> ReplyDetector
+        Worker --> SheetsSync
+    end
+
+    subgraph External_APIs ["External Google Cloud Services"]
+        Gemini["Google Gemini AI API<br/>(gemini-2.5-flash)"]
+        Gmail["Google Gmail API v1<br/>(users.messages.send / threads)"]
+        Sheets["Google Sheets API v4<br/>(spreadsheets.values)"]
+        DNS["DNS MX Nameservers<br/>(Domain Resolution)"]
+    end
+
+    %% Connections
+    SPA -- "HTTPS / REST (JWT Auth)" --> FastAPI
+    FastAPI -- "Async CRUD & Query" --> Postgres
+    
+    Poller -- "SELECT ... FOR UPDATE SKIP LOCKED" --> T_Messages
+    Sender -- "UPDATE status = 'SENT'" --> T_Messages
+    ReplyDetector -- "UPDATE status = 'REPLIED'" --> T_Messages
+
+    FastAPI -- "Check MX Records" --> DNS
+    FastAPI -- "Draft Inference" --> Gemini
+    Sender -- "Dispatch MIME Email" --> Gmail
+    ReplyDetector -- "Poll Inbound Threads" --> Gmail
+    SheetsSync -- "Batch Read/Write Rows" --> Sheets

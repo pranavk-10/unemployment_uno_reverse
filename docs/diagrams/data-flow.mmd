@@ -1,0 +1,56 @@
+sequenceDiagram
+    autonumber
+    actor User as Outreach Operator
+    participant UI as Watermelon UI (SPA)
+    participant API as FastAPI Web Service
+    participant DB as PostgreSQL 16
+    participant Worker as Background Worker
+    participant Gemini as Google Gemini AI
+    participant Gmail as Google Gmail API
+    participant Sheets as Google Sheets API
+
+    Note over User, Sheets: Step 1: Contact Ingestion & Pre-Send Verification
+    User->>UI: Sync Contacts from Google Sheet
+    UI->>API: POST /api/v1/contacts/sync-sheets
+    API->>Sheets: spreadsheets.values.get (A2:G100)
+    Sheets-->>API: Prospect Rows
+    API->>API: Run RFC Syntax, DNS MX, & Disposable Checks
+    API->>DB: INSERT INTO contacts (status = 'VERIFIED')
+    API-->>UI: Return Verified Contact List
+
+    Note over User, Gemini: Step 2: AI Personalization & Human Review
+    User->>UI: Select Verified Contacts -> "Generate AI Drafts"
+    UI->>API: POST /api/v1/campaigns/{id}/generate-drafts
+    API->>Gemini: Prompt (Resume Profile + Prospect Context)
+    Gemini-->>API: Structured JSON {subject, body_markdown}
+    API->>API: Scan for unparsed placeholders ({{...}})
+    API->>DB: INSERT INTO messages (status = 'DRAFT_PENDING_REVIEW')
+    API-->>UI: Display Drafts in Review Queue
+
+    Note over User, DB: Step 3: Human-in-the-Loop Approval & Scheduling
+    User->>UI: Inspect & Edit Draft -> Click "Approve"
+    UI->>API: POST /api/v1/messages/{id}/approve
+    API->>DB: UPDATE messages SET status = 'SCHEDULED', scheduled_for = T + Jitter
+    API-->>UI: Draft Approved & Scheduled
+
+    Note over Worker, Gmail: Step 4: Worker Dispatch & Idempotent Send
+    loop Every 5 Seconds (Worker Polling)
+        Worker->>DB: SELECT * FROM messages WHERE scheduled_for <= NOW() FOR UPDATE SKIP LOCKED
+        DB-->>Worker: Acquire Row Lease (status = 'SENDING')
+        Worker->>Gmail: users.messages.send (Multipart MIME with tracking header)
+        Gmail-->>Worker: HTTP 200 OK (gmail_message_id, thread_id)
+        Worker->>DB: UPDATE messages SET status = 'SENT', gmail_message_id = ...
+        Worker->>Sheets: spreadsheets.values.batchUpdate (Row Status = "SENT")
+    end
+
+    Note over Gmail, DB: Step 5: Telemetry Tracking & Reply Detection
+    opt Open Pixel Requested
+        Gmail->>API: GET /api/v1/telemetry/pixel/{tracking_id}.png
+        API->>DB: INSERT INTO message_events (event_type = 'OPEN')
+    end
+
+    loop Every 5 Minutes (Reply Detector)
+        Worker->>Gmail: users.threads.get (thread_id)
+        Gmail-->>Worker: Thread Message History
+        Worker->>DB: If reply from prospect: UPDATE messages SET status = 'REPLIED'
+    end

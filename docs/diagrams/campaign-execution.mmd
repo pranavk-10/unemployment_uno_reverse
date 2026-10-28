@@ -1,0 +1,25 @@
+flowchart TD
+    Start([Worker Polling Tick: Every 5s]) --> QueryDB{Query messages where<br/>status = 'SCHEDULED' and<br/>scheduled_for <= NOW and<br/>campaign is ACTIVE}
+
+    QueryDB -- No Messages Ready --> Sleep[Sleep 5 Seconds] --> Start
+    QueryDB -- Message Ready --> Lock[Acquire Atomic DB Lease:<br/>SELECT FOR UPDATE SKIP LOCKED]
+
+    Lock --> CheckCap{Check Daily Limit:<br/>Total Sent Today < Max Limit?}
+    CheckCap -- Cap Exceeded --> Reschedule[Reschedule to Next Business Day 09:00] --> CommitSkip[Commit DB & Release Lock] --> Start
+
+    CheckCap -- Under Limit --> CheckSupp{Is Contact or Domain<br/>in Suppression List?}
+    CheckSupp -- Yes --> MarkSupp[Update status = 'SUPPRESSED'] --> CommitSkip
+
+    CheckSupp -- No --> MarkSending[Update status = 'SENDING'<br/>Set worker_lease_until = NOW + 5m]
+    MarkSending --> Dispatch[Call Gmail API users.messages.send]
+
+    Dispatch --> Result{API Response}
+    Result -- HTTP 200 OK --> MarkSent[Record gmail_message_id & thread_id<br/>Set status = 'SENT'<br/>Set sent_at = NOW]
+    MarkSent --> SheetsWrite[Batch Update Google Sheet Status Column]
+    SheetsWrite --> ReleaseLock[Commit DB Transaction & Release Lock] --> Start
+
+    Result -- HTTP 429 Rate Limit --> PauseCamp[Pause Campaign<br/>Backoff 15m] --> ReleaseLock
+    Result -- HTTP 401 Auth Revoked --> MarkAuthFail[Flag Integration NEEDS_REAUTH<br/>Set status = 'FAILED'] --> ReleaseLock
+    Result -- 5xx Network Timeout --> CheckSentBeforeRetry{Query Gmail API for Message-ID<br/>Did email actually dispatch?}
+    CheckSentBeforeRetry -- Yes --> MarkSent
+    CheckSentBeforeRetry -- No --> Requeue[Increment retry_count<br/>Reset status = 'SCHEDULED'<br/>Set backoff delay] --> ReleaseLock
